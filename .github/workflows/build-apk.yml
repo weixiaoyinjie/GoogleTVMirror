@@ -13,32 +13,31 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Find and extract uploaded project ZIP
-        id: project
         shell: bash
         run: |
           set -euo pipefail
           ZIP_FILE="$(find . -maxdepth 1 -type f -name '*.zip' -print -quit)"
           if [ -z "$ZIP_FILE" ]; then
-            echo 'No ZIP found in repository root. Please upload the GoogleTVMirror source ZIP.' >&2
+            echo 'ERROR: Source ZIP not found in repository root.' >&2
             exit 1
           fi
           mkdir -p extracted
           unzip -q "$ZIP_FILE" -d extracted
           SETTINGS_FILE="$(find extracted -type f -name settings.gradle -print -quit)"
           if [ -z "$SETTINGS_FILE" ]; then
-            echo 'The uploaded ZIP is missing settings.gradle.' >&2
+            echo 'ERROR: settings.gradle not found inside ZIP.' >&2
             exit 1
           fi
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Located Android project: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project: $PROJECT_DIR"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -46,11 +45,31 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # GitHub Ubuntu runners include Android SDK and command-line tools.
+      # Avoid android-actions/setup-android@v3, which failed while downloading
+      # a second copy of command-line tools on this repository's first run.
+      - name: Use preinstalled Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$ANDROID_HOME"
+          TOOL="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$TOOL" ]; then
+            echo "ERROR: Expected preinstalled sdkmanager not found at $TOOL" >&2
+            find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager -print || true
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$(dirname "$TOOL")" >> "$GITHUB_PATH"
+          "$TOOL" --version
 
       - name: Install Android Platform 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            'platforms;android-35' 'build-tools;35.0.0'
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -58,7 +77,10 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build debug APK
-        run: gradle --no-daemon --stacktrace -p "${{ steps.project.outputs.project_dir }}" assembleDebug
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace -p "$PROJECT_DIR" assembleDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
